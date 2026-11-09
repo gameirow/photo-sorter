@@ -18,6 +18,11 @@ Desktop app that sorts a photo/video folder into category folders by content. Ru
 - Videos (toggle "Videos → A-roll / B-roll"): 8 keyframes (averaged for sorting, kept per frame for search) (PyAV, keyframe-only decode). Speech share comes from Silero VAD (first 120 s). A-roll = speech ≥30% and the TALK_PROMPT score ≥0.01, or speech ≥60%. Everything else is B-roll, sub-sorted by category. Thresholds live in `assign()`.
 - Output: "Organise in place" (default) moves files into `<category>`, `A-roll/` and `B-roll/<category>/` inside the chosen folder itself and removes only the folders that move emptied; a file that can't be moved (locked by OneDrive/another app) is skipped and reported, never half-copied; the output path can be changed. Copy mode is still available. Move writes `_sort_log.json` atomically every 20 files and at the end, so even a crash leaves Undo a record (each run is appended, so Undo walks back every run to the original layout and removes the emptied category folders).
 
+- Keep dates (on by default): folders become `category/YYYY-MM` from the dated folder name or EXIF/video date, else `undated`. Never the file-system date.
+- Duplicates (Output card): identical files (same bytes) come pre-ticked, keeping the plainest name. Same-shot look-alikes (embedding cosine >= 0.985, or iPhone IMG_X/IMG_EX edit pairs >= 0.93) are never pre-ticked. Ticked files and their sidecars go to the Recycle Bin (send2trash), and the server refuses to remove a whole group.
+- Video search results play in-app from the matching moment (`/api/media/{id}`, range requests; HEVC verified in WebView2), with an "Open in video player" fallback.
+- The last folder reopens on launch, so search is ready. `sorter.log` is timestamped and rotates at 1 MB.
+
 ## Performance design
 - Pipeline: files decode in a thread pool (`WORKERS`, up to 8) while the model loads; the GPU classifies batches (`BATCH`=16) as soon as they're ready.
 - Disk caches in `%TEMP%/photo_sorter_thumbs/`: thumbnails, video frames + speech (`*_v.json`), embeddings per model (`emb_<model>.pt`, fp16). A re-run on the same folder skips decoding and the GPU entirely (tested: 14.2 s → 0.3 s for 423 files).

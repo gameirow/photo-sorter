@@ -10,8 +10,29 @@ from pathlib import Path
 if __name__ == "__main__":
     # Launcher: open the window on the intro animation at once, then load the heavy engine (PyTorch etc.) behind it.
     _here = Path(__file__).resolve().parent
-    if sys.stdout is None or sys.stderr is None:  # launched windowless (pythonw): log to a file
-        _log = open(_here / "sorter.log", "a", buffering=1, encoding="utf-8")
+    if sys.stdout is None or sys.stderr is None:  # launched windowless (pythonw): log to a file, timestamped
+        import time as _time
+
+        class _Stamped:
+            def __init__(self, f):
+                self.f, self.bol = f, True
+
+            def write(self, text):
+                for line in text.splitlines(True):
+                    if self.bol and line.strip():
+                        self.f.write(_time.strftime("[%H:%M:%S] "))
+                    self.f.write(line)
+                    self.bol = line.endswith("\n")
+                return len(text)
+
+            def flush(self):
+                self.f.flush()
+
+        _lp = _here / "sorter.log"
+        if _lp.exists() and _lp.stat().st_size > 1_000_000:  # keep it small: one previous log is kept
+            _lp.replace(_here / "sorter.old.log")
+        _log = _Stamped(open(_lp, "a", buffering=1, encoding="utf-8"))
+        _log.write(f"\n===== Sorter started {_time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
         sys.stdout, sys.stderr = sys.stdout or _log, sys.stderr or _log
     sys.path.insert(0, str(_here))
     try:
@@ -68,6 +89,7 @@ if __name__ == "__main__":
 import hashlib
 import io
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -78,6 +100,9 @@ import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # quiet, harmless library notices: keep the log readable
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -140,8 +165,8 @@ class Classifier:
         from transformers import AutoModel, AutoProcessor  # lazy: keeps app start instant
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = torch.float16 if self.device == "cuda" else torch.float32
-        self.model = AutoModel.from_pretrained(model_id, torch_dtype=self.dtype).to(self.device).eval()
-        self.proc = AutoProcessor.from_pretrained(model_id)
+        self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
+        self.proc = AutoProcessor.from_pretrained(model_id, use_fast=False)  # same processor the caches were built with
         self.label = torch.cuda.get_device_name(0) if self.device == "cuda" else "CPU"
 
     @staticmethod
@@ -448,9 +473,43 @@ EMB = {"img": None, "frames": None, "fidx": []}  # fidx[j] = (item id, frame k, 
 RUNNING = ("scanning", "loading", "sorting")
 
 
-def prepare_safe(p):
+DATE_DIR = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_. ]?(0[1-9]|1[0-2])(?!\d)")  # 202108_a, 2021-08, 2021_08 …
+
+
+def date_of(p, root=None):
+    """When a photo/video is from, as 'YYYY-MM'. Order: a dated folder it sits in (your own filing, and the only
+    date film scans have), then the date inside the file (EXIF / video metadata). Never the file-system date."""
+    if root is not None:
+        try:
+            parts = p.parent.relative_to(root).parts
+        except ValueError:
+            parts = ()
+        for part in reversed(parts):
+            m = DATE_DIR.search(part)
+            if m:
+                return f"{m.group(1)}-{m.group(2)}"
     try:
-        return prepare(p, p.suffix.lower() in VID_EXTS)
+        if p.suffix.lower() in VID_EXTS:
+            import av
+            with av.open(str(p)) as c:
+                ct = c.metadata.get("creation_time") or c.metadata.get("com.apple.quicktime.creationdate") or ""
+            if re.match(r"(19[7-9]|20\d)\d-\d\d", ct) and not ct.startswith(("1970", "1904")):
+                return ct[:7]
+        elif p.suffix.lower() not in RAW_EXTS:
+            ex = Image.open(p).getexif()
+            v = ex.get_ifd(0x8769).get(36867) or ex.get(306) or ""
+            if re.match(r"(19|20)\d\d:\d\d", v):
+                return v[:7].replace(":", "-")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def prepare_safe(p, root=None):
+    try:
+        info = prepare(p, p.suffix.lower() in VID_EXTS)
+        info["date"] = date_of(p, root)
+        return info
     except Exception as e:  # noqa: BLE001
         print(f"skip {p.name}: {e}")
         return None
@@ -504,7 +563,7 @@ def job(root, recursive, videos):
         threading.Thread(target=load, daemon=True).start()  # model loads while files decode
 
         with ThreadPoolExecutor(WORKERS) as ex:
-            for p, info in zip(files, ex.map(prepare_safe, files)):
+            for p, info in zip(files, ex.map(lambda f: prepare_safe(f, root), files)):
                 if info is None:
                     S["total"] -= 1
                     continue
@@ -555,6 +614,7 @@ class MoveReq(BaseModel):
 class OrgReq(BaseModel):
     mode: str = "Copy"
     out: str
+    dates: bool = True  # category/YYYY-MM/ — keep track of when
 
 class PathReq(BaseModel):
     path: str
@@ -619,6 +679,10 @@ def start(r: StartReq):
                  names=names, prompts=prompts, threshold=r.threshold, model=r.model, device="",
                  root=str(root), over=load_overrides(root))
     EMB["img"], EMB["frames"], EMB["fidx"] = None, None, []
+    try:  # remember it: next launch reopens this folder so search works at once
+        SETTINGS.write_text(json.dumps({**settings(), "last": str(root), "last_cats": r.cats, "last_model": r.model}))
+    except Exception:  # noqa: BLE001
+        pass
     threading.Thread(target=job, args=(root, r.recursive, r.videos), daemon=True).start()
     return {"run": S["run"], "out": str(root)}  # default: organise the chosen folder in place
 
@@ -688,7 +752,7 @@ def organize(r: OrgReq):
             os.replace(tmp, log_file)
 
     try:
-        _organize(items, out, r.mode, log, errors, emptied, write_log)
+        _organize(items, out, r.mode, log, errors, emptied, write_log, r.dates)
     finally:  # always record what moved, even if something failed halfway, so Undo can put it back
         if r.mode == "Move":
             write_log()
@@ -708,9 +772,11 @@ def organize(r: OrgReq):
     return {"msg": f"{verb} {len(log)} FILES{note} → {out}", "errors": len(errors)}
 
 
-def _organize(items, out, mode, log, errors, emptied, checkpoint=lambda: None):
+def _organize(items, out, mode, log, errors, emptied, checkpoint=lambda: None, dates=True):
     for it in items:
         dest = out.joinpath(*[safe(x) for x in it["cat"].split(SEP)])  # "B-roll · city" -> B-roll/city
+        if dates:
+            dest = dest / (it.get("date") or "undated")                   # … -> B-roll/city/2021-08
         dest.mkdir(parents=True, exist_ok=True)
         moved = []
         for f in [it["path"], *it["extras"]]:
@@ -853,6 +919,163 @@ def search(q: str, limit: int = 200):
 SEARCH_MATCH, SEARCH_MAYBE = -8.5, -10.0
 
 
+# ---------------- duplicates ----------------
+# measured on real photos: the same shot saved twice (HEIC + exported JPG, renamed copies) scored >= 0.985;
+# different shots of one scene (bursts, clips filmed a minute apart) peaked at 0.977
+DUP_SIM = 0.985
+DUP_EDIT = 0.93  # iPhone keeps an edit next to its original (IMG_1234 + IMG_E1234): a crop/filter/frame scored 0.967
+DUPES = {"groups": []}
+
+
+def _md5(p, buf=1 << 20):
+    h = hashlib.md5()
+    with open(p, "rb") as f:
+        while b := f.read(buf):
+            h.update(b)
+    return h.hexdigest()
+
+
+def _edit_base(stem):
+    """IMG_E1234 -> IMG_1234 (iPhone's name for the edited copy), else None."""
+    m = re.match(r"^(.*?)E(\d{3,})$", stem, re.I)
+    return (m[1] + m[2]).lower() if m and m[1] else None
+
+
+def _keep_rank(it):
+    """Which identical copy to keep: the one with its edit sidecar, then the plainest name, then the oldest."""
+    stem = Path(it["path"]).stem
+    noisy = bool(re.search(r"\(\d+\)|copy|cópia|_\d$| - \d$", stem, re.I)) or _edit_base(stem) is not None
+    return (-len(it["extras"]), noisy, len(stem), Path(it["path"]).stat().st_mtime, it["path"])
+
+
+@app.get("/api/dupes")
+def dupes():
+    """Groups of duplicates in the analyzed folder: identical files (same bytes) and the same shot saved twice."""
+    if S["phase"] != "done" or EMB["img"] is None:
+        raise HTTPException(409, "Analyze a folder first — duplicates are found among the analyzed files.")
+    items = [it for it in S["items"] if Path(it["path"]).exists()]
+    parent = {it["id"]: it["id"] for it in items}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def join(a, b):
+        parent[find(a)] = find(b)
+
+    # identical: same size first (cheap), then same bytes
+    by_size, digest = {}, {}
+    for it in items:
+        by_size.setdefault(Path(it["path"]).stat().st_size, []).append(it)
+    for g in by_size.values():
+        if len(g) > 1:
+            for it in g:
+                digest[it["id"]] = _md5(it["path"])
+            seen = {}
+            for it in g:
+                if digest[it["id"]] in seen:
+                    join(it["id"], seen[digest[it["id"]]])
+                else:
+                    seen[digest[it["id"]]] = it["id"]
+    # the same shot in two files: near-identical picture (photos with photos, videos with videos)
+    ids = [it["id"] for it in items]
+    if ids:
+        E = EMB["img"][ids].float()
+        E = E / E.norm(dim=-1, keepdim=True)
+        kind = [it["kind"] for it in items]
+        stem = [Path(it["path"]).stem.lower() for it in items]
+        base = [_edit_base(Path(it["path"]).stem) for it in items]
+        for a0 in range(0, len(ids), 1024):
+            sim = E[a0:a0 + 1024] @ E.T
+            for a, b in (sim >= DUP_EDIT).nonzero().tolist():
+                a += a0
+                if b <= a or kind[a] != kind[b]:
+                    continue
+                v = sim[a - a0, b].item()
+                edit_pair = base[a] == stem[b] or base[b] == stem[a]
+                if v >= DUP_SIM or edit_pair:
+                    join(ids[a], ids[b])
+    comps = {}
+    for it in items:
+        comps.setdefault(find(it["id"]), []).append(it)
+    root = Path(S["root"])
+    groups = []
+    for g in comps.values():
+        if len(g) < 2:
+            continue
+        by_hash = {}
+        for it in g:
+            if it["id"] in digest:
+                by_hash.setdefault(digest[it["id"]], []).append(it)
+        sel, same = set(), {}
+        for n, copies in enumerate(c for c in by_hash.values() if len(c) > 1):
+            keep = min(copies, key=_keep_rank)
+            sel |= {it["id"] for it in copies if it is not keep}  # identical bytes: nothing is lost
+            same |= {it["id"]: "ABCDEFGH"[n % 8] for it in copies}
+        exact = len(by_hash) == 1 and len(next(iter(by_hash.values()))) == len(g)
+        rows = []
+        for it in sorted(g, key=_keep_rank):
+            p = Path(it["path"])
+            try:
+                rel = str(p.relative_to(root))
+            except ValueError:
+                rel = str(p)
+            rows.append({"id": it["id"], "name": it["name"], "path": it["path"], "rel": rel,
+                         "size": p.stat().st_size, "date": it.get("date", ""), "thumb": it["l"],
+                         "video": it["kind"] == "video", "extras": len(it["extras"]),
+                         "same": same.get(it["id"], ""), "sel": it["id"] in sel})
+        groups.append({"kind": "exact" if exact else "similar", "items": rows})
+    groups.sort(key=lambda g: (g["kind"] != "exact", -max(r["size"] for r in g["items"])))
+    DUPES["groups"] = [[r["id"] for r in g["items"]] for g in groups]
+    pre = sum(r["size"] for g in groups for r in g["items"] if r["sel"])
+    return {"groups": groups, "files": sum(len(g["items"]) for g in groups), "preselected_bytes": pre}
+
+
+class TrashReq(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/trash")
+def trash(r: TrashReq):
+    """Send chosen duplicates (and their edit sidecars) to the Recycle Bin. Never the last copy of anything."""
+    from send2trash import send2trash
+    if S["phase"] != "done":
+        raise HTTPException(409, "Analyze a folder first.")
+    want = set(r.ids)
+    for g in DUPES["groups"]:
+        if set(g) <= want:
+            raise HTTPException(400, "Keep at least one file from every group — nothing was deleted.")
+    allowed = {i for g in DUPES["groups"] for i in g}
+    if not want <= allowed:
+        raise HTTPException(400, "Only files listed as duplicates can be deleted here — nothing was deleted.")
+    for g in DUPES["groups"]:
+        if (set(g) & want) and not any(Path(S["items"][i]["path"]).exists() for i in g if i not in want):
+            raise HTTPException(409, "A file you're keeping is gone — re-open Duplicates. Nothing was deleted.")
+    done, failed, freed = 0, [], 0
+    for i in sorted(want):
+        it = S["items"][i]
+        for f in [it["path"], *it["extras"]]:
+            p = Path(f)
+            if not p.exists():
+                continue
+            try:
+                size = p.stat().st_size
+                send2trash(str(p))
+                freed += size
+                done += f == it["path"]
+                print(f"recycled: {p}")
+            except Exception as e:  # noqa: BLE001
+                failed.append(p.name)
+                print(f"could not recycle {p}: {e}")
+    DUPES["groups"] = []
+    msg = f"{done} duplicate{'s' if done != 1 else ''} moved to the Recycle Bin · {freed / 1e6:.0f} MB freed"
+    if failed:
+        msg += f" · {len(failed)} couldn't be moved (open in another app?)"
+    return {"msg": msg, "done": done, "failed": failed, "freed": freed}
+
+
 @app.post("/api/reveal")
 def reveal(r: PathReq):
     """Show a file selected in File Explorer."""
@@ -882,13 +1105,40 @@ class SettingsReq(BaseModel):
 
 @app.get("/api/settings")
 def get_settings():
-    return {"sound": settings().get("sound", True)}
+    st = settings()
+    last = st.get("last", "")
+    reopen = last if S["phase"] == "idle" and last and Path(last).is_dir() else ""
+    return {"sound": st.get("sound", True), "reopen": reopen}
 
 
 @app.post("/api/settings")
 def set_settings(r: SettingsReq):
     SETTINGS.write_text(json.dumps({**settings(), "sound": r.sound}))
     return {"sound": r.sound}
+
+
+@app.get("/api/media/{item_id}")
+def media(item_id: int):
+    """Stream a photo/video of the analyzed folder (only those: never an arbitrary path). Supports seeking."""
+    if not 0 <= item_id < len(S["items"]):
+        raise HTTPException(404, "Not in the analyzed folder.")
+    p = Path(S["items"][item_id]["path"])
+    if not p.exists():
+        raise HTTPException(404, "That file isn't there any more.")
+    ext = p.suffix.lower()
+    kind = "video/mp4" if ext in (".mov", ".mp4", ".m4v") else (mimetypes.guess_type(p.name)[0] or "application/octet-stream")
+    return FileResponse(p, media_type=kind)
+
+
+@app.post("/api/openfile")
+def open_file(r: PathReq):
+    """Open a file with its Windows default app (e.g. a video the window can't play)."""
+    p = Path(r.path)
+    if not p.exists():
+        raise HTTPException(404, "That file isn't there any more.")
+    if sys.platform.startswith("win"):
+        os.startfile(p)  # noqa: S606
+    return {"ok": True}
 
 
 def preload():
@@ -916,6 +1166,6 @@ def bind_drop(win, url):
         doc = win.dom.document
         doc.events.dragover += DOMEventHandler(lambda e: None, True, False)
         doc.events.drop += DOMEventHandler(on_drop, True, False)
-        print("drag and drop ready")
+        print("ready: window, engine and drag-and-drop")
     except Exception as e:  # noqa: BLE001
         print(f"drag and drop unavailable: {e}")

@@ -39,6 +39,12 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 4
 .hr{display:flex;align-items:center;gap:8px}
 .snd{width:32px;height:32px;border-radius:50%;border:1px solid var(--line2);background:rgba(255,255,255,.7);cursor:pointer;font-size:13px;line-height:1}
 .snd:hover{border-color:var(--ink)}
+.playerS{width:min(1120px,92vw);height:min(780px,88vh)}
+.pbody{flex:1;min-height:0;margin:10px 28px 0;border-radius:18px;overflow:hidden;background:#0B0A0E;display:grid;place-items:center;position:relative}
+.pbody video{max-width:100%;max-height:100%;display:block}
+.perr{position:absolute;inset:0;display:grid;place-content:center;gap:8px;text-align:center;color:#fff}
+.perr[hidden]{display:none}.perr b{font-weight:500;font-size:16px}.perr span{opacity:.6}.perr em{font-style:normal;color:#FFB15A}
+.pbar{display:flex;gap:8px;justify-content:flex-end;padding:14px 28px 20px}
 .pill{font:11px var(--mono);color:var(--mut);padding:6px 12px;border:1px solid var(--line2);border-radius:99px;background:rgba(255,255,255,.7)}
 
 /* layout */
@@ -59,6 +65,16 @@ header{display:flex;align-items:center;justify-content:space-between;padding:0 4
 .btn:hover{border-color:var(--ink)}
 .link{background:none;border:0;font:12px var(--sans);color:var(--mut);cursor:pointer;padding:0}
 .link:hover{color:var(--ink)}
+.link:disabled{opacity:.4;cursor:default}
+.link.hot{color:var(--hot)}
+/* duplicates */
+.dph .chk{position:absolute;right:8px;top:8px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.25);box-shadow:0 1px 4px rgba(0,0,0,.3);pointer-events:none}
+.dph.tick img{outline-color:#C9361A;opacity:.55}
+.dph.tick .chk{background:#C9361A;border-color:#C9361A}
+.dph.tick .chk::after{content:"\2715";position:absolute;inset:0;display:grid;place-items:center;color:#fff;font:700 11px var(--sans)}
+.dph:not(.tick) figcaption b{color:var(--ink)}
+.dgo{font:500 12px var(--sans);border:0;border-radius:99px;padding:8px 14px;background:#C9361A;color:#fff;cursor:pointer}
+.dgo:disabled{background:var(--line2);color:var(--mut);cursor:default}
 
 .switch{display:flex;align-items:center;justify-content:space-between;margin-top:12px;font-size:12px;color:#55554F;cursor:pointer}
 .switch input{appearance:none;width:30px;height:18px;border-radius:99px;background:#DADAD5;position:relative;cursor:pointer;transition:background .2s}
@@ -221,10 +237,11 @@ input[type=range]::-webkit-slider-thumb{appearance:none;width:14px;height:14px;b
       <section class="card">
         <div class="lbl"><span>Output</span></div>
         <div class="seg" id="modeSeg"><button data-v="Move" class="on">Organise in place</button><button data-v="Copy">Copy</button></div>
+        <label class="switch" style="margin-top:10px" title="Folders become category / year-month, e.g. food / 2021-08">Keep dates (food / 2021-08)<input type="checkbox" id="dates" checked></label>
         <div class="field" style="margin-top:10px"><input id="out" placeholder="Output folder (default: the folder you chose)" spellcheck="false"><button class="btn" id="open">Open</button></div>
         <div style="height:12px"></div>
         <button class="primary" id="exec" disabled><span id="execT">Move into folders</span><span class="arr">→</span></button>
-        <div class="row2"><button class="link" id="resort" disabled>Re-sort</button><button class="link" id="undo">Undo last move</button></div>
+        <div class="row2"><button class="link" id="resort" disabled>Re-sort</button><button class="link" id="dupBtn" disabled title="Find copies of the same photo or video">Duplicates</button><button class="link" id="undo">Undo last move</button></div>
         <div class="result" id="result"></div>
       </section>
     </div>
@@ -262,8 +279,26 @@ input[type=range]::-webkit-slider-thumb{appearance:none;width:14px;height:14px;b
 <div class="scrim" id="searchS">
   <div class="sheet review">
     <div class="sh"><span class="ix">Search</span><h2 id="sQ">—</h2><span class="sub" id="sSub"></span><button class="close" id="sClose">✕</button></div>
-    <div class="movebar"><span class="t">Nothing moves · click a result to show it in File Explorer · videos jump to the matching moment's frame</span></div>
+    <div class="movebar"><span class="t">Nothing moves · click a photo to show it in File Explorer · click a video to play it from the matching moment</span></div>
     <div class="pgrid" id="sgrid"></div>
+  </div>
+</div>
+
+<div class="scrim" id="dupS">
+  <div class="sheet review">
+    <div class="sh"><span class="ix">Duplicates</span><h2 id="dH">—</h2><span class="sub" id="dSub"></span><button class="close" id="dClose">✕</button></div>
+    <div class="movebar"><span class="t">Ticked ✕ = goes to the Recycle Bin (restore it from there any time) · identical copies come pre-ticked · look-alikes are up to you · right-click shows a file in Explorer</span>
+      <div class="selbar"><button class="link" id="dNone">Untick all</button><button class="dgo" id="dGo" disabled>—</button></div></div>
+    <div class="pgrid" id="dgrid"></div>
+  </div>
+</div>
+
+<div class="scrim" id="player">
+  <div class="sheet playerS">
+    <div class="sh"><span class="ix" id="pAt"></span><h2 id="pName">—</h2><span class="sub" id="pSub"></span><button class="close" id="pClose">✕</button></div>
+    <div class="pbody"><video id="pv" controls playsinline preload="auto"></video>
+      <div class="perr" id="pErr" hidden><b>This video's format can't play inside Sorter</b><span>Open it in your video player — then jump to <em id="pErrAt"></em></span></div></div>
+    <div class="pbar"><button class="btn" id="pReveal">Show in File Explorer</button><button class="btn" id="pExt">Open in video player</button></div>
   </div>
 </div>
 
@@ -433,6 +468,7 @@ const bootEls = [document.querySelector('.app > header'), ...document.querySelec
 bootEls.forEach(el => el.style.opacity = 0);
 function startBoot(){  // act two of the launch: panels slide up in turn while the sphere assembles
   BOOT = performance.now();
+  setTimeout(reopenLast, 900);
   bootEls.forEach((el, k) => { el.style.opacity = ''; el.style.animationDelay = (el === view ? 0 : 120 + k * 110) + 'ms'; el.classList.add('boot');
     el.addEventListener('animationend', () => el.classList.remove('boot'), { once: true }); });
 }
@@ -569,7 +605,9 @@ $('#eSave').onclick = () => { catsText = $('#catsBox').value; store.set('ps.cats
 
 addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); $('#q').focus(); $('#q').select(); return; }
+  if (e.key === 'Escape' && playerS.classList.contains('open')) { closePlayer(); return; }
   if (e.key === 'Escape' && searchS.classList.contains('open')) { searchS.classList.remove('open'); return; }
+  if (e.key === 'Escape' && dupS.classList.contains('open')) { dupS.classList.remove('open'); return; }
   if (e.target.matches('input,textarea')) return;
   if (e.key === 'Escape') { closeReview(); editor.classList.remove('open'); }
   if (reviewCat && /^[1-9]$/.test(e.key) && sel.size) { const c = Object.keys(bins)[+e.key - 1]; if (c && c !== reviewCat) move([...sel], c); }
@@ -580,6 +618,35 @@ const sndBtn = $('#snd');
 const showSnd = on => { sndBtn.textContent = on ? '🔊' : '🔇'; sndBtn.title = on ? 'Intro sound on — click to mute' : 'Intro sound off — click to turn on'; sndBtn.dataset.on = on ? 1 : ''; };
 showSnd(window.SPLASH_SOUND !== false);
 sndBtn.onclick = async () => { const d = await api('/api/settings', { sound: !sndBtn.dataset.on }); if (d) { showSnd(d.sound); toast(d.sound ? 'Intro sound on' : 'Intro sound muted'); } };
+
+/* ---------------- video player: opens at the matching moment ---------------- */
+const playerS = $('#player'), pv = $('#pv');
+let pItem = null;
+function openPlayer(r){
+  pItem = r; $('#pErr').hidden = true; pv.hidden = false;
+  $('#pName').textContent = r.name; $('#pAt').textContent = `▶ ${mmss(r.at)}`;
+  $('#pSub').textContent = `match for “${$('#q').value.trim()}” at ${mmss(r.at)} · starts just before it · in ${(r.cat || '').split(' · ').pop()}`;
+  $('#pErrAt').textContent = mmss(r.at);
+  pv.onloadedmetadata = () => { pv.currentTime = Math.max(0, r.at - 1.5); pv.play().catch(() => {}); };
+  pv.onerror = () => { pv.hidden = true; $('#pErr').hidden = false; };
+  pv.src = `/api/media/${r.id}`;
+  playerS.classList.add('open');
+}
+function closePlayer(){ pv.pause(); pv.removeAttribute('src'); pv.load(); playerS.classList.remove('open'); pItem = null; }
+$('#pClose').onclick = closePlayer;
+playerS.addEventListener('click', e => { if (e.target === playerS) closePlayer(); });
+$('#pReveal').onclick = () => pItem && api('/api/reveal', { path: pItem.path });
+$('#pExt').onclick = () => { if (!pItem) return; pv.pause(); api('/api/openfile', { path: pItem.path }); toast(`Opening in your video player — the moment is at ${mmss(pItem.at)}`); };
+
+/* ---------------- reopen the last folder: search works straight away ---------------- */
+async function reopenLast(){
+  try {
+    const d = await (await fetch('/api/settings')).json();
+    if (!d.reopen || phase !== 'idle' || $('#folder').value) return;
+    $('#folder').value = d.reopen; $('#go').click();
+    toast(`Reopened ${d.reopen.split(/[\\/]/).filter(Boolean).pop()} — search is ready when it finishes`);
+  } catch (e) {}
+}
 
 /* ---------------- search ---------------- */
 const searchS = $('#searchS'), sgrid = $('#sgrid');
@@ -598,7 +665,7 @@ async function runSearch(){
     f.querySelector('img').src = r.thumb; f.querySelector('span').textContent = r.name;
     f.querySelector('b').textContent = (r.cat || '').split(' · ').pop();
     if (r.video) { const m = document.createElement('em'); m.textContent = `▶ at ${mmss(r.at)}`; f.appendChild(m); }
-    f.onclick = () => api('/api/reveal', { path: r.path });
+    f.onclick = () => r.video ? openPlayer(r) : api('/api/reveal', { path: r.path });
     return f; };
   strong.forEach(r => frag.appendChild(card(r)));
   if (maybe.length) { const h = document.createElement('div'); h.className = 'sdiv'; h.textContent = 'Maybe'; frag.appendChild(h); maybe.forEach(r => frag.appendChild(card(r))); }
@@ -608,6 +675,66 @@ async function runSearch(){
 $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
 $('#sClose').onclick = () => searchS.classList.remove('open');
 searchS.addEventListener('click', e => { if (e.target === searchS) searchS.classList.remove('open'); });
+
+/* ---------------- duplicates: you choose, they go to the Recycle Bin ---------------- */
+const dupS = $('#dupS'), dgrid = $('#dgrid');
+let dup = null, dsel = new Set();
+const mb = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : (b / 1e6).toFixed(b < 1e7 ? 1 : 0) + ' MB';
+async function dupCount(){
+  let d; try { const r = await fetch('/api/dupes'); if (!r.ok) return; d = await r.json(); } catch (e) { return; }
+  const n = d.groups.length; $('#dupBtn').textContent = n ? `Duplicates · ${n}` : 'No duplicates';
+  $('#dupBtn').classList.toggle('hot', n > 0);
+}
+async function openDupes(){
+  const d = await api('/api/dupes'); if (!d) return; dup = d;
+  dsel = new Set(d.groups.flatMap(g => g.items.filter(r => r.sel).map(r => r.id)));
+  const ex = d.groups.filter(g => g.kind === 'exact').length;
+  $('#dH').textContent = d.groups.length ? `${d.groups.length} ${d.groups.length === 1 ? 'group' : 'groups'}` : 'None found';
+  $('#dSub').textContent = d.groups.length ? `${ex} identical · ${d.groups.length - ex} same shot in different files · ${d.files} files` : '';
+  const frag = document.createDocumentFragment();
+  if (!d.groups.length) { const e = document.createElement('div'); e.className = 'sempty'; e.textContent = 'No duplicates in this folder.'; frag.appendChild(e); }
+  d.groups.forEach(g => {
+    const h = document.createElement('div'); h.className = 'sdiv';
+    h.textContent = g.kind === 'exact' ? 'Identical copies — same bytes, nothing is lost' : 'Same shot in different files (e.g. original + edit) — your call';
+    frag.appendChild(h);
+    g.items.forEach(r => {
+      const f = document.createElement('figure'); f.className = 'ph dph' + (dsel.has(r.id) ? ' tick' : '');
+      f.title = `${r.rel}${r.date ? '\ntaken ' + r.date : ''}${r.extras ? '\n+ its edit sidecar (goes with it)' : ''}\nclick: tick / untick · right-click: show in File Explorer`;
+      f.innerHTML = '<img loading="lazy" alt=""><i class="chk"></i><figcaption><span></span><b></b></figcaption>';
+      f.querySelector('img').src = r.thumb; f.querySelector('span').textContent = r.rel; f.querySelector('b').textContent = mb(r.size);
+      const tag = [r.video ? '▶ video' : '', g.kind !== 'exact' && r.same ? `identical ${r.same}` : ''].filter(Boolean).join(' · ');
+      if (tag) { const m = document.createElement('em'); m.textContent = tag; f.appendChild(m); }
+      f.onclick = () => {
+        if (dsel.has(r.id)) dsel.delete(r.id);
+        else if (g.items.every(x => x.id === r.id || dsel.has(x.id))) { toast('Keep at least one from each group', true); return; }
+        else dsel.add(r.id);
+        f.classList.toggle('tick', dsel.has(r.id)); dupSum(); };
+      f.oncontextmenu = e => { e.preventDefault(); api('/api/reveal', { path: r.path }); };
+      frag.appendChild(f);
+    });
+  });
+  dgrid.replaceChildren(frag); dupSum(); dupS.classList.add('open'); dgrid.scrollTop = 0;
+}
+function dupTicked(){ return dup ? dup.groups.flatMap(g => g.items).filter(r => dsel.has(r.id)) : []; }
+function dupSum(){
+  const t = dupTicked(), b = t.reduce((a, r) => a + r.size, 0);
+  $('#dGo').disabled = !t.length;
+  $('#dGo').textContent = t.length ? `Move ${t.length} to Recycle Bin · ${mb(b)}` : 'Tick the copies to remove';
+}
+$('#dupBtn').onclick = openDupes;
+$('#dClose').onclick = () => dupS.classList.remove('open');
+dupS.addEventListener('click', e => { if (e.target === dupS) dupS.classList.remove('open'); });
+$('#dNone').onclick = () => { dsel.clear(); dgrid.querySelectorAll('.tick').forEach(f => f.classList.remove('tick')); dupSum(); };
+$('#dGo').onclick = async () => {
+  const t = dupTicked(); if (!t.length) return;
+  const side = t.filter(r => r.extras).length;
+  if (!confirm(`Move ${t.length} file${t.length > 1 ? 's' : ''} (${mb(t.reduce((a, r) => a + r.size, 0))}) to the Recycle Bin?` +
+      `${side ? `\n${side} of them take their edit sidecar along.` : ''}\n\nYou can restore them from the Recycle Bin.`)) return;
+  const d = await api('/api/trash', { ids: t.map(r => r.id) }); if (!d) return;
+  dupS.classList.remove('open'); $('#result').textContent = d.msg;
+  toast(d.msg, d.failed.length > 0); fire(d.failed.length ? 'error' : 'done');
+  setTimeout(() => $('#go').click(), 900);  // re-analyze (cached: seconds) so folders and search drop the removed files
+};
 
 /* ---------------- backend ---------------- */
 async function api(url, body){
@@ -625,6 +752,8 @@ async function poll(){
   catch { polling = false; if (phase !== 'error') fire('error'); phase = 'error'; setStatus({ phase: 'error', msg: 'Lost connection to the sorter engine' }); pollTimer = setTimeout(poll, 2000); return; }
   if (d.run !== run) { resetLocal(); run = d.run; since = 0; }
   const prev = phase; total = d.total; done = d.done; phase = d.phase;
+  if (prev !== phase && phase === 'done') dupCount();
+  if (prev !== phase && phase !== 'done') { $('#dupBtn').textContent = 'Duplicates'; $('#dupBtn').classList.remove('hot'); }
   if (prev !== phase) { if (phase === 'done' && RUNNING.includes(prev)) fire('done');
     else if (phase === 'error') { fire('error'); toast((d.msg || '').replace(/^ERROR:\s*/, ''), true); } }
   const now = performance.now();
@@ -645,7 +774,7 @@ function setStatus(d){
   const pct = d.phase === 'scanning' ? items.length / T_ : d.phase === 'sorting' ? d.done / T_ : d.phase === 'done' ? 1 : 0;
   $('#bar').style.width = (pct * 100) + '%';
   $('#idle').textContent = !items.length ? 'Choose a folder to begin' : d.phase === 'done' ? 'Click a folder to review' : '';
-  $('#go').disabled = running; $('#exec').disabled = d.phase !== 'done'; $('#resort').disabled = d.phase !== 'done';
+  $('#go').disabled = running; $('#exec').disabled = d.phase !== 'done'; $('#resort').disabled = d.phase !== 'done'; $('#dupBtn').disabled = d.phase !== 'done';
 }
 
 /* ---------------- controls ---------------- */
@@ -680,7 +809,7 @@ async function resort(){
 $('#resort').onclick = resort;
 $('#exec').onclick = async () => {
   if (mode === 'Move' && !confirm(`Organise ${$('#out').value} — files are moved into category folders there. You can undo this.`)) return;
-  const d = await api('/api/organize', { mode, out: $('#out').value }); if (d) { $('#result').textContent = nice(d.msg); if (d.errors) { toast(`${d.errors} file(s) could not be moved — see sorter.log`, true); fire('error'); } else { toast('Done'); fire('done'); } }
+  const d = await api('/api/organize', { mode, out: $('#out').value, dates: $('#dates').checked }); if (d) { $('#result').textContent = nice(d.msg); if (d.errors) { toast(`${d.errors} file(s) could not be moved — see sorter.log`, true); fire('error'); } else { toast('Done'); fire('done'); } }
 };
 $('#undo').onclick = async () => { const d = await api('/api/undo', { path: $('#out').value });
   if (d) { $('#result').textContent = nice(d.msg); toast('Restored'); } };
@@ -691,6 +820,8 @@ $('#open').onclick = () => api('/api/open', { path: $('#out').value });
   catsText = store.get('ps.cats') || defaultsText; renderTags();
   $('#folder').value = store.get('ps.folder') || '';
   const m = store.get('ps.model'); if (m) document.querySelector(`#modelSeg [data-v="${m}"]`)?.click();
+  if (store.get('ps.dates') === '0') $('#dates').checked = false;
+  $('#dates').onchange = () => store.set('ps.dates', $('#dates').checked ? '1' : '0');
   poll();
 })();
 </script>
