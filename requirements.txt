@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pywebview
+transformers>=4.49,<5
+sentencepiece
+protobuf
+pillow
+pillow-heif
+rawpy
+av
+silero-vad

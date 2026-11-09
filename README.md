@@ -1,0 +1,30 @@
+# Sorter
+
+Desktop app that sorts a photo/video folder into category folders by content. Runs 100% locally (Windows, RTX 3060 laptop).
+
+## Files
+- `photo_sorter.py`: launcher + engine. Run as a script it opens the window instantly on the intro (`splash.html`) and imports itself as the engine in the background (PyTorch takes a few seconds), then preloads the default model. Engine: FastAPI on a random localhost port + Google SigLIP 2 zero-shot (CUDA if available), shown in a native window via pywebview (Edge WebView2). Falls back to the browser if pywebview is missing. Logs to `sorter.log` when launched windowless.
+- `splash.html`: launch intro (particles stream from a spark into the SORTER wordmark, light sweep, fly-through into the app). Played by the launcher while the engine loads, then finished inside `ui.html` (injected by `/`; `/app` plays it whole in a plain browser). Preview any moment with `?splashT=<seconds>` (silent). Sound is synthesized live with Web Audio (no files): charge → zap → sparkles panned left→right as the letters fill → sub-bass hit + A-major-add9 synth chord as the word locks → shimmer with the light sweep → riser into the app (the app page carries the chord over the hand-off via `&tail=1`). The launcher sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--autoplay-policy=no-user-gesture-required` so it plays without a click. Robustness: sound events are clamped to never start in the past and are fenced off in try/catch; any error in an intro frame ends the intro instead of freezing it; and the app removes a leftover intro overlay after 7 s regardless (a past bug: a negative audio start time froze the overlay = black screen). The 🔊 button in the header mutes it (saved in `%TEMP%/photo_sorter_thumbs/settings.json`).
+- `ui.html`: interface. Drag a folder (or a file inside it) onto the window to analyze it. A light shell with a dark viewport holding an interactive orange particle sphere (drag to rotate, hover to disturb, click to pulse); classified files fly out of it into folder cards. The review sheet sorts least confident first; select, then drag onto a chip or press 1-9.
+- `run.bat`: the first run builds `.venv` (CUDA torch), installs `requirements.txt` (reinstalls automatically when it changes) and creates a desktop shortcut "Sorter" with `sorter.ico`.
+
+## How it works
+- Search (header bar, Ctrl+F): free text ("food", "a man in a white t-shirt") over every photo and every sampled video moment of the analyzed folder, wherever it's filed; moves nothing. Two phrasings (`q`, `a photo of q`), stronger wins; SigLIP logit ≥ -8.5 = match, -10..-8.5 = maybe (`SEARCH_MATCH`/`SEARCH_MAYBE`, measured on real photos). Videos show the matching frame and its time; click reveals the file in Explorer.
+- Default categories (17): portrait, selfie, group, party & events, animals, food, landscape, snow & mountains, travel & landmarks, beach & sea, city & architecture, plants & flowers, sport & fitness, outfits & fashion, cars & vehicles, night, screenshots & documents. Each file goes to exactly one (its best match).
+- Confidence: softmax over the categories (0–1, shares of belief); the Confidence floor sends anything below it to `_unsorted`, review flags < 0.4.
+- Categories: one per line, `folder name: what it looks like` (the text is the zero-shot prompt; any language).
+- Photos: JPG/PNG/HEIC/etc. Fuji RAF follows its matching JPG; RAW-only shots are classified from the embedded preview. Edit sidecars (iPhone `.AAE`, `.XMP`) follow the photo/video with the same name; orphan sidecars stay put.
+- Feedback: on opening, the sphere's particles spiral in from a cloud and settle with a ripple (~2.3 s) while the panels slide up in turn (plays even with Windows animation effects off); the sphere speeds up while sorting, bursts green with rings when a sort or organise finishes, and shudders red (staying red, plus a red toast) on an error.
+- Videos (toggle "Videos → A-roll / B-roll"): 8 keyframes (averaged for sorting, kept per frame for search) (PyAV, keyframe-only decode). Speech share comes from Silero VAD (first 120 s). A-roll = speech ≥30% and the TALK_PROMPT score ≥0.01, or speech ≥60%. Everything else is B-roll, sub-sorted by category. Thresholds live in `assign()`.
+- Output: "Organise in place" (default) moves files into `<category>`, `A-roll/` and `B-roll/<category>/` inside the chosen folder itself and removes only the folders that move emptied; a file that can't be moved (locked by OneDrive/another app) is skipped and reported, never half-copied; the output path can be changed. Copy mode is still available. Move writes `_sort_log.json` atomically every 20 files and at the end, so even a crash leaves Undo a record (each run is appended, so Undo walks back every run to the original layout and removes the emptied category folders).
+
+## Performance design
+- Pipeline: files decode in a thread pool (`WORKERS`, up to 8) while the model loads; the GPU classifies batches (`BATCH`=16) as soon as they're ready.
+- Disk caches in `%TEMP%/photo_sorter_thumbs/`: thumbnails, video frames + speech (`*_v.json`), embeddings per model (`emb_<model>.pt`, fp16). A re-run on the same folder skips decoding and the GPU entirely (tested: 14.2 s → 0.3 s for 423 files).
+- Saved fixes: manual moves are stored per folder in `sessions/<hash>.json` and re-applied on every analyze/re-sort.
+- UI polling sends only new items and a change log (`since`), not the full list.
+
+## Status / next steps
+- Built and tested in a Linux sandbox with a stand-in model. NOT yet run on the real Windows laptop with the real SigLIP model, GPU, pywebview or real Fuji/phone footage. First job: run `run.bat` on a real folder and fix whatever breaks.
+- Then: calibrate the A-roll thresholds on 20-30 real clips; try the `fast` vs `accurate` models on real photos.
+- Ideas not built: open a video at the matched moment, Google Takeout mode (Google removed third-party full-library access on 31 Mar 2025, so Takeout is the route), multi-label (one photo in two folders), splitting long clips into scenes, video playback in review, duplicate/blur detection, face grouping, a PyInstaller installer.

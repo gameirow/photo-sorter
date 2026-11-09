@@ -1,0 +1,238 @@
+<!-- Launch intro. Shown instantly by the launcher while the engine loads (SPLASH_MODE='intro'),
+     then continued inside ui.html from the same frame (SPLASH_MODE='outro'). 'full' plays both halves. -->
+<style>
+#splash{position:fixed;inset:0;z-index:1000;background:#0B0A0E;overflow:hidden;cursor:default}
+#splash canvas{position:absolute;inset:0;width:100%;height:100%}
+#splashMsg{position:absolute;left:0;right:0;bottom:13%;text-align:center;font:500 11px/1.5 "Segoe UI",system-ui,sans-serif;
+  letter-spacing:.32em;text-transform:uppercase;color:rgba(255,255,255,0);transition:color .9s ease;pointer-events:none}
+#splashMsg.on{color:rgba(255,255,255,.42)}
+#splashMsg.err{color:#FF7A5A;letter-spacing:.02em;text-transform:none;font-size:14px;padding:0 40px}
+</style>
+<div id="splash"><canvas id="splashC"></canvas><div id="splashMsg"></div></div>
+<script>
+(() => {
+  const MODE = window.SPLASH_MODE || 'full';
+  const box = document.getElementById('splash'), cv = document.getElementById('splashC'), ctx = cv.getContext('2d');
+  const msg = document.getElementById('splashMsg');
+  const BG = [11, 10, 14], END = [243, 243, 240];
+  const STOPS = [[0, [64, 36, 255]], [.3, [150, 58, 255]], [.58, [255, 46, 126]], [.82, [255, 124, 28]], [1, [255, 200, 96]]];
+  const col = t => { for (let i = 1; i < STOPS.length; i++) if (t <= STOPS[i][0]) { const a = STOPS[i - 1], b = STOPS[i], u = (t - a[0]) / (b[0] - a[0]);
+    return a[1].map((v, k) => Math.round(v + (b[1][k] - v) * u)); } return STOPS[4][1]; };
+  const seeded = s => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const easeOut = x => 1 - (1 - x) ** 3, easeIn = x => x * x * x, clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+
+  // timeline (seconds): spark 0-.5 · particles stream into the word .45-2.0 · light sweep 1.9-2.7 · hold from HOLD · exit 1.1 s
+  const HOLD = 2.7, EXIT = 1.1;
+  let W, H, cx, cy, pts = [], x0 = 0, x1 = 1, fs = 100;
+  function layout(){
+    const d = Math.min(2, devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight; cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0);
+    cx = W / 2; cy = H / 2;
+    fs = Math.min(W * .15, H * .25);
+    const oc = document.createElement('canvas'), ow = Math.ceil(W), oh = Math.ceil(fs * 1.5);
+    oc.width = ow; oc.height = oh;
+    const o = oc.getContext('2d');
+    o.fillStyle = '#fff'; o.textBaseline = 'middle';
+    o.font = `900 ${fs}px "Segoe UI Black","Segoe UI","Arial Black",system-ui,sans-serif`;
+    const word = 'SORTER', sp = fs * .06, ws = [...word].map(c => o.measureText(c).width);
+    let x = (ow - ws.reduce((a, b) => a + b, 0) - sp * (word.length - 1)) / 2;
+    [...word].forEach((c, i) => { o.fillText(c, x, oh / 2); x += ws[i] + sp; });
+    const data = o.getImageData(0, 0, ow, oh).data, step = Math.max(2, Math.round(fs / 34)), rnd = seeded(7);
+    pts = []; x0 = ow; x1 = 0;
+    for (let y = 0; y < oh; y += step) for (let x = 0; x < ow; x += step) if (data[(y * ow + x) * 4 + 3] > 140) {
+      const tx = x + (rnd() - .5) * step * .6, ty = cy - oh / 2 + y + (rnd() - .5) * step * .6;
+      pts.push({ tx, ty }); x0 = Math.min(x0, tx); x1 = Math.max(x1, tx);
+    }
+    for (const p of pts) {
+      const u = (p.tx - x0) / (x1 - x0 || 1), c = col(u);
+      p.c = `rgb(${c})`; p.u = u;
+      p.delay = .45 + u * .55 + rnd() * .3;            // the word fills in left to right
+      p.dur = .75 + rnd() * .35;
+      p.curl = (rnd() - .5) * 1.6;                        // each particle arcs in on its own curve
+      p.s = step * (.5 + rnd() * .35);
+      p.ph = rnd() * 6.28;
+    }
+  }
+  layout();
+  addEventListener('resize', layout);
+
+  let t0 = performance.now() - (MODE === 'outro' ? HOLD * 1000 : 0), goUrl = null, exitAt = null, failed = false, waitShown = false;
+  if (MODE === 'full') exitAt = HOLD + .15;
+  if (MODE === 'outro') exitAt = HOLD + .12;
+
+  const FREEZE = new URLSearchParams(location.search).get('splashT');  // preview a moment: ?splashT=1.5
+
+  // ---------------------------------------------------------------- sound (synthesized live: no audio files)
+  const SOUND = window.SPLASH_SOUND !== false && new URLSearchParams(location.search).get('splashT') == null;
+  let AC = null, OUT = null, MASTER = null, NOISE = null;
+  function audio(){
+    if (AC || !SOUND) return AC;
+    try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; }
+    const comp = AC.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
+    MASTER = AC.createGain(); MASTER.gain.value = .6;
+    const rev = AC.createConvolver(), len = AC.sampleRate * 2.8, ir = AC.createBuffer(2, len, AC.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2); }
+    rev.buffer = ir;
+    const wet = AC.createGain(); wet.gain.value = .34;
+    OUT = AC.createGain();
+    OUT.connect(MASTER); OUT.connect(rev); rev.connect(wet); wet.connect(MASTER); MASTER.connect(comp); comp.connect(AC.destination);
+    NOISE = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+    const nd = NOISE.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    window.__sfxState = () => AC.state;
+    return AC;
+  }
+  function env(g, at, dur, vol, attack){
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(vol, at + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+  }
+  function pan(at, dur, p0, p1){
+    const p = AC.createStereoPanner(); p.pan.setValueAtTime(p0, at); p.pan.linearRampToValueAtTime(p1 ?? p0, at + dur); p.connect(OUT); return p;
+  }
+  function tone(type, f0, f1, at, dur, vol, o = {}){
+    at = Math.max(at, AC.currentTime + .005);
+    const osc = AC.createOscillator(), g = AC.createGain(); osc.type = type;
+    osc.frequency.setValueAtTime(f0, at); osc.frequency.exponentialRampToValueAtTime(f1, at + dur);
+    if (o.detune) osc.detune.value = o.detune;
+    let node = osc;
+    if (o.lp) { const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(o.lp[0], at); f.frequency.exponentialRampToValueAtTime(o.lp[1], at + (o.lpT || dur)); node.connect(f); node = f; }
+    node.connect(g); g.connect(pan(at, dur, o.pan || 0, o.pan1)); env(g, at, dur, vol, o.attack || .01);
+    osc.start(at); osc.stop(at + dur + .05);
+  }
+  function noise(at, dur, vol, type, f0, f1, o = {}){
+    at = Math.max(at, AC.currentTime + .005);
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+    src.buffer = NOISE; src.loop = true; f.type = type; f.Q.value = o.Q || 1;
+    f.frequency.setValueAtTime(f0, at); f.frequency.exponentialRampToValueAtTime(f1, at + dur);
+    src.connect(f); f.connect(g); g.connect(pan(at, dur, o.pan || 0, o.pan1)); env(g, at, dur, vol, o.attack || .01);
+    src.start(at, Math.random()); src.stop(at + dur + .05);
+  }
+  const CHORD = [110, 164.81, 220, 277.18, 329.63, 493.88];      // A major add9: wide, bright, a little sci-fi
+  function pad(at, dur, vol, attack){
+    CHORD.forEach((f, i) => { for (const d of [-7, 7]) tone('sawtooth', f, f, at, dur, vol, { detune: d, lp: [500, 2600], lpT: attack + .4, attack, pan: (i % 2 ? .55 : -.55) * (d > 0 ? 1 : .6) }); });
+  }
+  // the score, in the same seconds as the picture
+  function scoreIntro(T){                       // T = audio time of visual t = 0
+    tone('sine', 180, 900, T, .5, .12, { attack: .3 });                    // charge
+    tone('triangle', 360, 1800, T, .5, .04, { attack: .35 });
+    noise(T, .5, .1, 'bandpass', 300, 2600, { Q: 3, attack: .42 });
+    tone('sawtooth', 1400, 120, T + .45, .35, .09, { lp: [6000, 800] });    // burst: zap + thump
+    noise(T + .45, .28, .2, 'highpass', 1800, 900, { attack: .003 });
+    tone('sine', 90, 40, T + .45, .45, .4, { attack: .004 });
+    noise(T + .5, 1.45, .07, 'bandpass', 800, 4200, { Q: 2, attack: .5, pan: -.8, pan1: .8 });   // the stream, left to right
+    const scale = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];
+    for (let i = 0; i < 64; i++) {                                         // sparkles as the letters fill in
+      const u = i / 63, at = T + .5 + u * 1.3 + Math.random() * .12, f = 1046.5 * 2 ** (scale[(Math.random() * scale.length) | 0] / 12);
+      tone('sine', f, f * 1.01, at, .14, .03 + Math.random() * .025, { attack: .004, pan: -.9 + 1.8 * u });
+    }
+    tone('sine', 62, 36, T + 1.95, 1.7, .55, { attack: .005 });              // the word locks in: sub hit
+    tone('sine', 124, 62, T + 1.95, .5, .22, { attack: .005 });
+    noise(T + 1.95, .5, .18, 'lowpass', 1200, 200, { attack: .003 });
+    pad(T + 1.95, 2.9, .03, .06);
+    noise(T + 2.0, .8, .08, 'bandpass', 3000, 9500, { Q: 8, attack: .25, pan: -.9, pan1: .9 });  // light sweep shimmer
+    tone('sine', 2637, 3136, T + 2.0, .8, .025, { attack: .2, pan: -.6, pan1: .6 });
+  }
+  function scoreExit(T, tail){                  // T = audio time the fly-through starts
+    if (tail) pad(T - .15, 1.6, .018, .12);                                // carry the chord over from the intro window
+    noise(T, 1.1, .3, 'bandpass', 400, 6500, { Q: 2, attack: .95 });        // riser
+    tone('sine', 200, 1600, T, 1.0, .1, { attack: .85 });
+    tone('sawtooth', 100, 800, T, 1.05, .035, { attack: .9, lp: [400, 5000] });
+    noise(T + 1.02, .7, .06, 'highpass', 5000, 3000, { attack: .01 });      // air release
+    tone('sine', 1318.5, 1318.5, T + 1.0, 1.3, .035, { attack: .01, pan: -.3 });
+    tone('sine', 1975.5, 1975.5, T + 1.0, 1.3, .03, { attack: .01, pan: .3 });
+  }
+  let scored = false, exitScored = false;
+  function startSound(t){                       // t = current visual time
+    if (scored) return; scored = true;
+    try {
+      if (!audio()) return;
+      if (AC.state === 'suspended') AC.resume().catch(() => {});
+      const T = AC.currentTime + .03 - t;
+      if (MODE !== 'outro' && t < .3) scoreIntro(T);
+    } catch (e) { console.warn('intro sound skipped:', e); }
+  }
+  function fadeOut(sec){ try { if (AC && MASTER) MASTER.gain.setTargetAtTime(0.0001, AC.currentTime, sec / 4); } catch (e) {} }
+  window.splashGo = url => { goUrl = url; };
+  window.splashError = text => { failed = true; msg.textContent = text; msg.className = 'err'; };
+
+  let finished = false;
+  function finish(){                            // remove the intro and hand over to the app, exactly once
+    if (finished) return; finished = true;
+    box.remove(); dispatchEvent(new Event('splashdone'));
+    if (AC) setTimeout(() => { try { AC.close(); } catch (e) {} }, 2500);
+  }
+  window.splashFinish = finish;
+  if (MODE !== 'intro' && FREEZE == null)       // failsafe: the app is never left behind the intro
+    setTimeout(finish, ((exitAt ?? HOLD) - (MODE === 'outro' ? HOLD : 0) + EXIT) * 1000 + 2500);
+  function frame(now){                          // an error in one frame can never freeze the intro
+    try { draw(now); }
+    catch (e) { console.error('intro frame error', e); if (MODE !== 'intro') { finish(); return; } }
+    if (!finished) requestAnimationFrame(frame);
+  }
+  function draw(now){
+    const t = FREEZE != null ? +FREEZE : (now - t0) / 1000;
+    if (!scored) startSound(t);
+    if (MODE === 'intro' && goUrl && t >= HOLD) {          // hand over to the app page; it carries the chord on if we're on time
+      const url = goUrl + (t < HOLD + 1.2 && SOUND ? '&tail=1' : ''); goUrl = null;
+      fadeOut(.12); setTimeout(() => location.replace(url), 130);
+    }
+    if (MODE === 'intro' && !waitShown && t > 4.5 && !failed) { waitShown = true; msg.textContent = 'Warming up the engine'; msg.className = 'on'; }
+    const k = exitAt != null ? clamp((t - exitAt) / EXIT, 0, 1) : 0;
+    if (k > 0 && !exitScored && AC) { exitScored = true;
+      try { scoreExit(AC.currentTime + .02 - (t - exitAt), MODE === 'outro' && new URLSearchParams(location.search).has('tail')); }
+      catch (e) { console.warn('exit sound skipped:', e); } }
+    if (k >= 1) { finish(); return; }
+
+    // background: dark, with motion-blur trails while the word assembles; crossfades to the app's shell colour on exit
+    const fade = clamp((k - .3) / .7, 0, 1), bg = BG.map((v, i) => Math.round(v + (END[i] - v) * easeIn(fade)));
+    const trails = t > .4 && t < 2.2 && !k;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = trails ? `rgba(${BG},.28)` : `rgb(${bg})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // the spark
+    if (t < .75) {
+      const g = clamp(t / .45, 0, 1), r = 3 + g * 5 + (t > .45 ? (t - .45) * 120 : 0), a = t > .45 ? 1 - (t - .45) / .3 : g;
+      const rg = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 6);
+      rg.addColorStop(0, `rgba(255,220,180,${a})`); rg.addColorStop(.25, `rgba(255,90,60,${a * .5})`); rg.addColorStop(1, 'rgba(255,60,40,0)');
+      ctx.fillStyle = rg; ctx.fillRect(cx - r * 6, cy - r * 6, r * 12, r * 12);
+      if (t > .45) { ctx.strokeStyle = `rgba(255,140,90,${a * .7})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(cx, cy, (t - .45) * 900, 0, 7); ctx.stroke(); }
+    }
+
+    // particles
+    const sweep = t > 1.9 && t < 2.8 ? x0 - 240 + (t - 1.9) / .8 * (x1 - x0 + 480) : -1e9;
+    const zoom = 1 + easeIn(k) * 9, alpha = 1 - easeIn(clamp((k - .45) / .55, 0, 1));
+    ctx.globalCompositeOperation = fade > .5 ? 'source-over' : 'lighter';
+    for (const p of pts) {
+      const u = clamp((t - p.delay) / p.dur, 0, 1);
+      if (u <= 0) continue;
+      const e = easeOut(u), dx = p.tx - cx, dy = p.ty - cy;
+      const mx = cx + dx * .5 - dy * p.curl, my = cy + dy * .5 + dx * p.curl * .5;   // bezier control point: a curved flight
+      let x = (1 - e) * (1 - e) * cx + 2 * (1 - e) * e * mx + e * e * p.tx;
+      let y = (1 - e) * (1 - e) * cy + 2 * (1 - e) * e * my + e * e * p.ty;
+      if (u >= 1) { x += Math.sin(t * 1.6 + p.ph) * .5; y += Math.cos(t * 1.3 + p.ph) * .5; }  // gentle breathing at rest
+      if (k) { x = cx + (x - cx) * zoom; y = cy + (y - cy) * zoom; }                       // fly through the word
+      const lit = Math.max(0, 1 - Math.abs(p.tx - sweep) / 90);
+      const s = p.s * (k ? zoom * .6 + .4 : 1);
+      ctx.globalAlpha = alpha * (u < 1 ? .55 + .45 * e : 1);
+      ctx.fillStyle = lit > .05 ? `rgb(${col(p.u).map(v => Math.round(v + (255 - v) * lit))})` : p.c;
+      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+    }
+    ctx.globalAlpha = 1;
+
+    // soft glow behind the finished word
+    const glow = clamp((t - 1.6) / .6, 0, 1) * (1 - k);
+    if (glow > 0) {
+      ctx.globalCompositeOperation = 'lighter';
+      const rg = ctx.createRadialGradient(cx, cy, 0, cx, cy, (x1 - x0) * .65);
+      rg.addColorStop(0, `rgba(255,70,90,${.10 * glow + .02 * Math.sin(t * 2)})`); rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    if (t > 2.1 && !k && !waitShown && !failed && MODE !== 'outro' && !msg.className) { msg.textContent = "sorts your photos by what's in them"; msg.className = 'on'; }
+    if (k > .1 && msg.className === 'on') msg.className = '';
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
