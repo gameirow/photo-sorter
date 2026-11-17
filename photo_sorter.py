@@ -28,6 +28,12 @@ if __name__ == "__main__":
             def flush(self):
                 self.f.flush()
 
+            def isatty(self):  # uvicorn's log formatter asks this to decide on colours
+                return False
+
+            def __getattr__(self, name):  # anything else a library asks of stdout: the real file has it
+                return getattr(self.f, name)
+
         _lp = _here / "sorter.log"
         if _lp.exists() and _lp.stat().st_size > 1_000_000:  # keep it small: one previous log is kept
             _lp.replace(_here / "sorter.old.log")
@@ -64,8 +70,13 @@ if __name__ == "__main__":
             " --disable-features=ElasticOverscroll --autoplay-policy=no-user-gesture-required").strip()
         _intro = ("<!doctype html><html><head><meta charset='utf-8'></head><body style='margin:0;background:#0B0A0E'>"
                   f"<script>window.SPLASH_MODE='intro';window.SPLASH_SOUND={'true' if _sound else 'false'}</script>" + (_here / "splash.html").read_text(encoding="utf-8") + "</body></html>")
-        _win = webview.create_window("Sorter", html=_intro, width=1480, height=920, min_size=(1180, 720),
-                                     background_color="#0B0A0E")
+        try:  # fit the screen (a 1080p laptop at 125 % is only 1536 x 864): open maximized, and size the
+            _sw, _sh = webview.screens[0].width, webview.screens[0].height  # restored window to fit too
+        except Exception:  # noqa: BLE001
+            _sw, _sh = 1920, 1080
+        _win = webview.create_window("Sorter", html=_intro, width=min(1480, int(_sw * .9)), height=min(920, int(_sh * .85)),
+                                     min_size=(min(1180, _sw - 40), min(720, _sh - 120)),
+                                     maximized=True, background_color="#0B0A0E")
 
         def _boot():
             import json
@@ -153,9 +164,7 @@ beach & sea: a photo of a beach, the sea or a lake
 city & architecture: a photo of a city street or buildings
 plants & flowers: a close-up photo of plants or flowers
 sport & fitness: a photo of sport, the gym or working out
-outfits & fashion: a photo of an outfit or streetwear
 cars & vehicles: a photo of a car, a motorbike or another vehicle
-night: a photo taken at night
 screenshots & documents: a screenshot or a photo of a document"""
 
 
@@ -340,8 +349,13 @@ def prepare(p, is_video):
 def scan(root, recursive, videos=True):
     files = root.rglob("*") if recursive else root.iterdir()
     imgs, raws, sides = [], {}, {}
+    try:  # copies Sorter itself made inside this folder aren't more photos: don't count them twice
+        lg = json.loads((root / "_sort_log.json").read_text())
+        made = {os.path.normcase(d) for _, d in lg["files"]} if lg.get("mode") == "Copy" else set()
+    except Exception:  # noqa: BLE001
+        made = set()
     for p in files:
-        if not p.is_file() or OUT_NAME in p.relative_to(root).parts:
+        if not p.is_file() or OUT_NAME in p.relative_to(root).parts or os.path.normcase(str(p)) in made:
             continue
         ext = p.suffix.lower()
         if ext in IMG_EXTS or (videos and ext in VID_EXTS):
@@ -642,12 +656,14 @@ def defaults():
 
 
 @app.get("/api/pick")
-def pick():
-    """Native folder picker on this machine."""
+def pick(start: str = ""):
+    """Native folder picker on this machine; opens at `start` when that folder exists."""
+    start = start.strip().strip('"')
+    start = start if start and Path(start).is_dir() else ""
     if WIN["w"] is not None:
         import webview
         kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None) or webview.FOLDER_DIALOG
-        res = WIN["w"].create_file_dialog(kind)
+        res = WIN["w"].create_file_dialog(kind, directory=start)
         if not res:
             return {"path": ""}
         return {"path": res[0] if isinstance(res, (list, tuple)) else res}
@@ -657,7 +673,7 @@ def pick():
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        path = filedialog.askdirectory(title="Choose a photo folder")
+        path = filedialog.askdirectory(title="Choose a folder", initialdir=start or None)
         root.destroy()
         return {"path": path or ""}
     except Exception as e:  # noqa: BLE001
@@ -668,6 +684,7 @@ def pick():
 def start(r: StartReq):
     if S["phase"] in RUNNING:
         raise HTTPException(409, "Already running.")
+    _not_while_organizing()
     root = Path(r.folder.strip().strip('"'))
     if not r.folder.strip() or not root.is_dir():
         raise HTTPException(400, f"Folder not found: {root}")
@@ -698,13 +715,20 @@ def state(have: int = 0, run: int = -1, since: int = 0):
                 "new": [{**{k: it[k] for k in ("id", "name", "s", "l", "dur", "speech")}, "v": it["kind"] == "video"}
                         for it in items[start_at:]],
                 "changes": [[i, items[i]["cat"], items[i]["score"]] for i in log[since:]],
-                "since": len(log), "fixes": len(S["over"])}
+                "since": len(log), "fixes": len(S["over"]),
+                "org": {k: ORG[k] for k in ("active", "mode", "done", "total", "cur", "msg", "errors", "seq")}}
+
+
+def _not_while_organizing():
+    if ORG["active"]:
+        raise HTTPException(409, "Wait for the sort into folders to finish (or stop it).")
 
 
 @app.post("/api/resort")
 def resort(r: ResortReq):
     if S["phase"] != "done" or EMB["img"] is None:
         raise HTTPException(409, "Analyze a folder first.")
+    _not_while_organizing()
     names, prompts = parse_cats(r.cats)
     clf = get_clf(S["model"])
     res = assign(S["items"], clf.scores(EMB["img"], clf.text(prompts + [TALK_PROMPT])), names, r.threshold)
@@ -720,6 +744,7 @@ def resort(r: ResortReq):
 def move(r: MoveReq):
     if not valid_cat(r.cat):
         raise HTTPException(400, "Unknown category.")
+    _not_while_organizing()
     with LOCK:
         for i in r.ids:
             if 0 <= i < len(S["items"]):
@@ -730,11 +755,52 @@ def move(r: MoveReq):
     return {"ok": True}
 
 
+# sorting into folders runs in the background; /api/state reports its progress
+ORG = {"active": False, "stop": False, "mode": "", "done": 0, "total": 0, "cur": "", "msg": "", "errors": 0, "seq": 0}
+
+
 @app.post("/api/organize")
 def organize(r: OrgReq):
     items = S["items"]
     if not items or S["phase"] != "done":
         raise HTTPException(409, "Analyze a folder first.")
+    if ORG["active"]:
+        raise HTTPException(409, "Already sorting into folders.")
+    if not r.out.strip().strip('"'):
+        raise HTTPException(400, "Choose an output folder first.")
+    if r.mode not in ("Move", "Copy"):
+        raise HTTPException(400, "Unknown mode.")
+    if r.mode == "Copy":
+        out, root = Path(r.out.strip().strip('"')).resolve(), Path(S["root"]).resolve()
+        if out == root or (root in out.parents and OUT_NAME not in out.relative_to(root).parts):
+            raise HTTPException(400, "Copy needs a folder outside the one you analyzed (or use Organise in place).")
+    ORG.update(active=True, stop=False, mode=r.mode, done=0, cur="", msg="", errors=0,
+               total=sum(1 + len(it["extras"]) for it in items))
+    threading.Thread(target=_organize_job, args=(r,), daemon=True).start()
+    return {"started": True, "total": ORG["total"]}
+
+
+@app.post("/api/organize/stop")
+def organize_stop():
+    ORG["stop"] = True  # finishes the current file, then stops; a Move stays fully undoable
+    return {"ok": True}
+
+
+def _organize_job(r):
+    try:
+        msg, errors = _organize_run(r)
+        ORG.update(msg=msg, errors=errors)
+    except Exception as e:  # noqa: BLE001
+        print(f"organize failed: {e}")
+        ORG.update(msg=f"ERROR: {e}", errors=-1)
+    finally:
+        ORG.update(active=False, cur="", seq=ORG["seq"] + 1)
+
+
+def _organize_run(r):
+    if r.mode == "Copy":
+        return _sync_copy(S["items"], Path(r.out.strip().strip('"')), r.dates)
+    items = S["items"]
     out = Path(r.out.strip().strip('"'))
     log, errors, emptied = [], [], set()
     log_file = out / "_sort_log.json"
@@ -767,19 +833,128 @@ def organize(r: OrgReq):
                 d = d.parent
     verb = "MOVED" if r.mode == "Move" else "COPIED"
     note = f" · {len(errors)} COULD NOT BE MOVED (SEE SORTER.LOG)" if errors else ""
+    if ORG["stop"]:
+        note += " · STOPPED EARLY" + (" (UNDO PUTS THEM BACK)" if r.mode == "Move" and log else "")
     for e in errors:
         print("organize:", e)
-    return {"msg": f"{verb} {len(log)} FILES{note} → {out}", "errors": len(errors)}
+    return f"{verb} {len(log)} FILES{note} → {out}", len(errors)
+
+
+def _dest(it, out, dates):
+    dest = out.joinpath(*[safe(x) for x in it["cat"].split(SEP)])  # "B-roll · city" -> B-roll/city
+    return dest / (it.get("date") or "undated") if dates else dest  # … -> B-roll/city/2021-08
+
+
+def _fid(p):
+    """A copy of a photo has its type and exact byte size (and its name, maybe with _1 added: checked by the caller).
+    Not the time: exFAT/FAT drives round it by up to 2 s, so it only breaks ties."""
+    return p.suffix.lower(), p.stat().st_size
+
+
+def _sync_copy(items, out, dates):
+    """Copy into `out`, or bring an earlier copy there up to date: every file ends up once, in its current
+    category folder. Copies already there are kept (moved within `out` if their category changed), never
+    copied again; extra copies of the same photo go to the Recycle Bin. Files `out` holds that don't come
+    from the analyzed folder are left alone."""
+    out.mkdir(parents=True, exist_ok=True)
+    log_file = out / "_sort_log.json"
+    try:
+        prev = json.loads(log_file.read_text())
+    except Exception:  # noqa: BLE001
+        prev = None
+    have = {}  # (type, size, mtime) -> copies already in out
+    for p in out.rglob("*"):
+        if not p.is_file() or p == log_file:
+            continue
+        if p.name.endswith(".part"):  # a copy cut short last time
+            p.unlink(missing_ok=True)
+            continue
+        have.setdefault(_fid(p), []).append(p)
+    claimed, matched, vacated, log, errors = set(), set(), set(), [], []
+    n = {"copied": 0, "moved": 0, "kept": 0, "recycled": 0}
+    for it in items:
+        if ORG["stop"]:
+            break
+        dest = _dest(it, out, dates)
+        ORG["cur"] = str(dest.relative_to(out)).replace("\\", " / ")
+        for f in [it["path"], *it["extras"]]:
+            ORG["done"] += 1
+            src = Path(f)
+            if not src.exists():
+                continue
+            stem = src.stem.lower()
+            t = src.stat().st_mtime
+            cands = sorted((p for p in have.get(_fid(src), []) if p not in claimed and p.stem.lower().startswith(stem)),
+                           key=lambda p: (abs(p.stat().st_mtime - t) > 2, len(p.stem)))  # closest copy first
+            matched.update(cands)
+            try:
+                here = [p for p in cands if p.parent == dest]
+                if here:  # already in the right folder (prefer the copy with its own name)
+                    dst = min(here, key=lambda p: p.name.lower() != src.name.lower())
+                    n["kept"] += 1
+                elif cands:  # copied before, but its category (or date) changed: move it, don't copy again
+                    dest.mkdir(parents=True, exist_ok=True)
+                    dst = unique(dest / src.name)
+                    os.replace(cands[0], dst)
+                    vacated.add(cands[0].parent)
+                    matched.discard(cands[0])
+                    n["moved"] += 1
+                else:
+                    dest.mkdir(parents=True, exist_ok=True)
+                    dst = unique(dest / src.name)
+                    part = dst.with_name(dst.name + ".part")  # only a finished copy gets the real name
+                    shutil.copy2(src, part)
+                    os.replace(part, dst)
+                    n["copied"] += 1
+            except OSError as e:
+                errors.append(f"{src}: {e}")
+                continue
+            claimed.add(dst)
+            log.append([str(src), str(dst)])
+    if not ORG["stop"]:  # extra copies of photos that already have their one copy: Recycle Bin
+        from send2trash import send2trash
+        for p in matched - claimed:
+            if p.exists():
+                try:
+                    send2trash(str(p))
+                    vacated.add(p.parent)
+                    n["recycled"] += 1
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{p}: could not recycle: {e}")
+    for d in sorted(vacated, key=lambda p: len(p.parts), reverse=True):  # folders left empty
+        while d != out and out in d.parents and d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+            d = d.parent
+    if log and not (prev and prev.get("mode") == "Move"):  # never overwrite a log Undo still needs
+        log_file.write_text(json.dumps({"mode": "Copy", "files": log}, indent=1))
+    for e in errors:
+        print("organize:", e)
+    parts = [f"COPIED {n['copied']} FILES"]
+    if n["moved"]:
+        parts.append(f"{n['moved']} MOVED TO THEIR NEW FOLDER")
+    if n["kept"]:
+        parts.append(f"{n['kept']} ALREADY IN PLACE")
+    if n["recycled"]:
+        parts.append(f"{n['recycled']} EXTRA COPIES TO THE RECYCLE BIN")
+    if errors:
+        parts.append(f"{len(errors)} COULD NOT BE COPIED (SEE SORTER.LOG)")
+    if ORG["stop"]:
+        parts.append("STOPPED EARLY — RUN IT AGAIN TO FINISH")
+    return " · ".join(parts) + f" → {out}", len(errors)
 
 
 def _organize(items, out, mode, log, errors, emptied, checkpoint=lambda: None, dates=True):
     for it in items:
+        if ORG["stop"]:
+            break
         dest = out.joinpath(*[safe(x) for x in it["cat"].split(SEP)])  # "B-roll · city" -> B-roll/city
         if dates:
             dest = dest / (it.get("date") or "undated")                   # … -> B-roll/city/2021-08
         dest.mkdir(parents=True, exist_ok=True)
+        ORG["cur"] = str(dest.relative_to(out)).replace("\\", " / ")
         moved = []
         for f in [it["path"], *it["extras"]]:
+            ORG["done"] += 1
             src = Path(f)
             if not src.exists() or (mode == "Move" and src.parent.resolve() == dest.resolve()):
                 moved.append(f)  # missing, or already in its category folder
@@ -809,6 +984,7 @@ def _organize(items, out, mode, log, errors, emptied, checkpoint=lambda: None, d
 
 @app.post("/api/undo")
 def undo(r: PathReq):
+    _not_while_organizing()
     log_file = Path(r.path.strip().strip('"')) / "_sort_log.json"
     if not log_file.exists():
         raise HTTPException(404, "No sort log in that output folder.")

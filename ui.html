@@ -101,6 +101,13 @@ input[type=range]::-webkit-slider-thumb{appearance:none;width:14px;height:14px;b
 .primary:active:not(:disabled){transform:scale(.99)}
 .primary:disabled{opacity:.3;cursor:default}
 .primary .arr{transition:transform .2s}.primary:hover .arr{transform:translateX(3px)}
+.primary .fill{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--grad);transition:width .35s ease-out}
+.primary.busy .fill{background-size:200% 100%;animation:orgflow 1.6s linear infinite}
+.primary.busy:hover::before{opacity:0}
+.primary.busy .arr{font-size:12px;opacity:.85}
+.primary.busy:hover .arr{transform:none;opacity:1;text-decoration:underline}
+@keyframes orgflow{to{background-position:-200% 0}}
+.result.live{color:var(--ink);font:11px var(--mono)}
 .row2{display:flex;justify-content:space-between;align-items:center;margin-top:12px}
 .result{font-size:12px;color:var(--mut);margin-top:10px;min-height:18px;word-break:break-word}
 
@@ -238,9 +245,9 @@ input[type=range]::-webkit-slider-thumb{appearance:none;width:14px;height:14px;b
         <div class="lbl"><span>Output</span></div>
         <div class="seg" id="modeSeg"><button data-v="Move" class="on">Organise in place</button><button data-v="Copy">Copy</button></div>
         <label class="switch" style="margin-top:10px" title="Folders become category / year-month, e.g. food / 2021-08">Keep dates (food / 2021-08)<input type="checkbox" id="dates" checked></label>
-        <div class="field" style="margin-top:10px"><input id="out" placeholder="Output folder (default: the folder you chose)" spellcheck="false"><button class="btn" id="open">Open</button></div>
+        <div class="field" style="margin-top:10px"><input id="out" placeholder="Output folder (default: the folder you chose)" spellcheck="false"><button class="btn" id="outBrowse">Browse</button><button class="btn" id="open">Open</button></div>
         <div style="height:12px"></div>
-        <button class="primary" id="exec" disabled><span id="execT">Move into folders</span><span class="arr">→</span></button>
+        <button class="primary" id="exec" disabled><b class="fill" id="execFill"></b><span id="execT">Move into folders</span><span class="arr" id="execA">→</span></button>
         <div class="row2"><button class="link" id="resort" disabled>Re-sort</button><button class="link" id="dupBtn" disabled title="Find copies of the same photo or video">Duplicates</button><button class="link" id="undo">Undo last move</button></div>
         <div class="result" id="result"></div>
       </section>
@@ -762,8 +769,44 @@ async function poll(){
   for (const [i, c, s] of d.changes) { const it = items[i]; if (it && c && !it.cat) { it.cat = c; it.score = s; queue.push(it); } }
   since = d.since;
   if (d.device) $('#device').textContent = `SigLIP 2 · ${model} · ${d.device}`;
-  setStatus(d); stats();
-  polling = false; pollTimer = setTimeout(poll, RUNNING.includes(phase) ? 300 : 1500);
+  setStatus(d); stats(); orgState(d.org);
+  polling = false; pollTimer = setTimeout(poll, RUNNING.includes(phase) || (d.org && d.org.active) ? 300 : 1500);
+}
+
+/* ---------------- sort into folders: progress ---------------- */
+let orgSeq = null, orgOn = false;
+function orgState(o){
+  if (!o) return;
+  if (orgSeq === null) orgSeq = o.seq;  // first poll: don't replay an old result
+  const b = $('#exec');
+  if (o.active) {
+    orgOn = true;
+    const pct = o.done / Math.max(1, o.total), verb = o.mode === 'Move' ? 'Moving' : 'Copying';
+    b.classList.add('busy'); b.disabled = false;
+    $('#execFill').style.width = (pct * 100).toFixed(1) + '%';
+    $('#execT').textContent = `${verb} ${o.done.toLocaleString()} / ${o.total.toLocaleString()} · ${Math.floor(pct * 100)}%`;
+    $('#execA').textContent = 'Stop';
+    $('#result').className = 'result live'; $('#result').textContent = o.cur ? `→ ${o.cur}` : 'Starting…';
+    document.body.classList.add('running');
+    $('#status').textContent = `${verb} into folders · ${o.done} / ${o.total}`;
+    $('#bar').style.width = (pct * 100) + '%';
+    ['#go', '#resort', '#dupBtn', '#undo', '#outBrowse'].forEach(s => $(s).disabled = true);
+    return;
+  }
+  if (orgOn || o.seq !== orgSeq) {  // just finished
+    orgOn = false; b.classList.remove('busy'); $('#execFill').style.width = '0';
+    $('#execT').textContent = mode === 'Move' ? 'Move into folders' : 'Sort into folders'; $('#execA').textContent = '→';
+    ['#undo', '#outBrowse'].forEach(s => $(s).disabled = false);
+    if (o.seq !== orgSeq) {
+      orgSeq = o.seq;
+      $('#result').className = 'result';
+      const err = o.errors < 0;
+      $('#result').textContent = err ? o.msg.replace(/^ERROR:\s*/, '') : nice(o.msg);
+      if (err) { toast('Sorting into folders failed — see sorter.log', true); fire('error'); }
+      else if (o.errors) { toast(`${o.errors} file(s) could not be moved — see sorter.log`, true); fire('error'); }
+      else { toast('Done'); fire('done'); }
+    }
+  }
 }
 function setStatus(d){
   const running = RUNNING.includes(d.phase), T_ = Math.max(1, d.total || 0);
@@ -784,9 +827,14 @@ function toast(msg, err){ const t = $('#toast'); t.textContent = msg; t.classNam
 function seg(id, cb){ $(id).addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
   $(id).querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); cb(b.dataset.v); }); }
 seg('#modelSeg', v => { model = v; store.set('ps.model', v); });
-seg('#modeSeg', v => { mode = v; $('#execT').textContent = v === 'Move' ? 'Move into folders' : 'Sort into folders'; });
+function outFor(m){  // Copy remembers its own destination; Organise in place works on the analyzed folder
+  const f = $('#folder').value.trim(), o = $('#out').value.trim();
+  if (m === 'Copy') { if (!o || o === f) $('#out').value = store.get('ps.copyOut') || ''; $('#out').placeholder = 'Choose where to copy to'; }
+  else { if (!o || o === store.get('ps.copyOut')) $('#out').value = f; $('#out').placeholder = 'Output folder (default: the folder you chose)'; }
+}
+seg('#modeSeg', v => { mode = v; store.set('ps.mode', v); outFor(v); if (!orgOn) $('#execT').textContent = v === 'Move' ? 'Move into folders' : 'Sort into folders'; });
 
-$('#browse').onclick = async () => { const d = await api('/api/pick');
+$('#browse').onclick = async () => { const d = await api('/api/pick?start=' + encodeURIComponent($('#folder').value));
   if (d && d.path) { $('#folder').value = d.path; store.set('ps.folder', d.path); }
   else if (d && d.error) toast('Folder picker unavailable — paste the path instead', true); };
 $('#folder').onchange = () => store.set('ps.folder', $('#folder').value);
@@ -796,7 +844,7 @@ $('#thr').onchange = () => { if (phase === 'done') resort(); };
 $('#go').onclick = async () => {
   store.set('ps.folder', $('#folder').value);
   const d = await api('/api/start', { folder: $('#folder').value, cats: catsText, model, recursive: $('#rec').checked, videos: $('#vids').checked, threshold: +$('#thr').value });
-  if (d) { $('#out').value = d.out; $('#result').textContent = ''; pulse0 = performance.now(); phase = 'scanning'; pollNow(); }
+  if (d) { $('#out').value = mode === 'Copy' ? (store.get('ps.copyOut') || '') : d.out; $('#result').textContent = ''; pulse0 = performance.now(); phase = 'scanning'; pollNow(); }
 };
 async function resort(){
   const d = await api('/api/resort', { cats: catsText, threshold: +$('#thr').value }); if (!d) return;
@@ -808,8 +856,17 @@ async function resort(){
 }
 $('#resort').onclick = resort;
 $('#exec').onclick = async () => {
+  if (orgOn) { $('#execA').textContent = 'Stopping…'; await api('/api/organize/stop', {}); return; }
+  if (!$('#out').value.trim()) { toast('Choose an output folder first', true); $('#outBrowse').focus(); return; }
   if (mode === 'Move' && !confirm(`Organise ${$('#out').value} — files are moved into category folders there. You can undo this.`)) return;
-  const d = await api('/api/organize', { mode, out: $('#out').value, dates: $('#dates').checked }); if (d) { $('#result').textContent = nice(d.msg); if (d.errors) { toast(`${d.errors} file(s) could not be moved — see sorter.log`, true); fire('error'); } else { toast('Done'); fire('done'); } }
+  const d = await api('/api/organize', { mode, out: $('#out').value, dates: $('#dates').checked });
+  if (d && mode === 'Copy') store.set('ps.copyOut', $('#out').value.trim());
+  if (d) { orgOn = true; $('#result').className = 'result live'; $('#result').textContent = 'Starting…'; pollNow(); }
+};
+$('#outBrowse').onclick = async () => {
+  const d = await api('/api/pick?start=' + encodeURIComponent($('#out').value || $('#folder').value));
+  if (d && d.path) $('#out').value = d.path;
+  else if (d && d.error) toast('Folder picker unavailable — paste the path instead', true);
 };
 $('#undo').onclick = async () => { const d = await api('/api/undo', { path: $('#out').value });
   if (d) { $('#result').textContent = nice(d.msg); toast('Restored'); } };
@@ -817,10 +874,18 @@ $('#open').onclick = () => api('/api/open', { path: $('#out').value });
 
 (async () => {
   const d = await api('/api/defaults'); defaultsText = d ? d.cats : '';
-  catsText = store.get('ps.cats') || defaultsText; renderTags();
+  catsText = store.get('ps.cats') || defaultsText;
+  if (!store.get('ps.mig.dropNightOutfits')) {  // these two overlapped every other category: removed once from saved lists
+    const drop = new Set(['night', 'outfits & fashion']);
+    const kept = catsText.split('\n').filter(l => !drop.has(l.split(':')[0].trim().toLowerCase()));
+    if (store.get('ps.cats')) store.set('ps.cats', kept.join('\n'));
+    catsText = kept.join('\n'); store.set('ps.mig.dropNightOutfits', '1');
+  }
+  renderTags();
   $('#folder').value = store.get('ps.folder') || '';
   const m = store.get('ps.model'); if (m) document.querySelector(`#modelSeg [data-v="${m}"]`)?.click();
   if (store.get('ps.dates') === '0') $('#dates').checked = false;
+  if (store.get('ps.mode') === 'Copy') document.querySelector('#modeSeg [data-v="Copy"]').click();
   $('#dates').onchange = () => store.set('ps.dates', $('#dates').checked ? '1' : '0');
   poll();
 })();
