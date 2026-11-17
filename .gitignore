@@ -3,3 +3,13 @@ __pycache__/
 *.pyc
 sorter.log
 sorter.old.log
+
+# secrets / local data
+.env
+.env.*
+_sort_log.json
+*.mp4
+*.mov
+*.jpg
+*.jpeg
+*.heic

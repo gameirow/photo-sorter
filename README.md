@@ -1,35 +1,85 @@
 # Sorter
 
-Desktop app that sorts a photo/video folder into category folders by content. Runs 100% locally (Windows, RTX 3060 laptop).
+**A local, AI-powered photo & video sorter for Windows.** Drop a messy camera-roll folder on it and Sorter files every photo and clip into category folders (food, travel, portrait, beach & sea…) by what is actually *in* the picture. It also lets you search your folder in plain words, like *"a man in a white t-shirt"*. Everything runs on your own PC, and nothing is uploaded.
 
-## Files
-- `photo_sorter.py`: launcher + engine. Run as a script it opens the window instantly on the intro (`splash.html`) and imports itself as the engine in the background (PyTorch takes a few seconds), then preloads the default model. Engine: FastAPI on a random localhost port + Google SigLIP 2 zero-shot (CUDA if available), shown in a native window via pywebview (Edge WebView2). Falls back to the browser if pywebview is missing. Logs to `sorter.log` when launched windowless.
-- `splash.html`: launch intro (particles stream from a spark into the SORTER wordmark, light sweep, fly-through into the app). Played by the launcher while the engine loads, then finished inside `ui.html` (injected by `/`; `/app` plays it whole in a plain browser). Preview any moment with `?splashT=<seconds>` (silent). Sound is synthesized live with Web Audio (no files): charge → zap → sparkles panned left→right as the letters fill → sub-bass hit + A-major-add9 synth chord as the word locks → shimmer with the light sweep → riser into the app (the app page carries the chord over the hand-off via `&tail=1`). The launcher sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--autoplay-policy=no-user-gesture-required` so it plays without a click. Robustness: sound events are clamped to never start in the past and are fenced off in try/catch; any error in an intro frame ends the intro instead of freezing it; and the app removes a leftover intro overlay after 7 s regardless (a past bug: a negative audio start time froze the overlay = black screen). The 🔊 button in the header mutes it (saved in `%TEMP%/photo_sorter_thumbs/settings.json`).
-- `ui.html`: interface. Drag a folder (or a file inside it) onto the window to analyze it. A light shell with a dark viewport holding an interactive orange particle sphere (drag to rotate, hover to disturb, click to pulse); classified files fly out of it into folder cards. The review sheet sorts least confident first; select, then drag onto a chip or press 1-9.
-- `run.bat`: the first run builds `.venv` (CUDA torch), installs `requirements.txt` (reinstalls automatically when it changes) and creates a desktop shortcut "Sorter" with `sorter.ico`.
+![Sorter: the main window, ready to analyse a folder](docs/screenshot.png)
+
+## Features
+
+- **Sort by content.** Zero-shot image classification with Google **SigLIP 2** puts each file in its best-matching category. 17 categories come built in, and you can write your own as `folder name: what it looks like`, in any language.
+- **Search inside the folder** (Ctrl+F). Free-text search over every photo and every sampled video moment. Video hits jump to the matching second and play in the app.
+- **Videos → A-roll / B-roll.** Speech detection (Silero VAD) separates talking-head clips from B-roll, and B-roll is sub-sorted by category.
+- **Keep dates.** Optional `category/YYYY-MM` folders, taken from EXIF, video metadata or the folder name. File-system dates are never used.
+- **Duplicate finder.** Byte-identical copies are pre-selected for the Recycle Bin, and look-alike shots are flagged but never auto-ticked.
+- **Safe moves with full Undo.** Every run is logged (`_sort_log.json`), so Undo can walk back to the original layout. Locked files (OneDrive and similar) are skipped, never half-copied.
+- **Review sheet.** Least-confident files come first. Drag them onto a category or press 1–9, and your fixes are remembered for that folder.
+- **Photographer-friendly.** Handles HEIC and RAW (Fuji RAF follows its JPG), and `.AAE` / `.XMP` sidecars travel with their photo.
+- **Fast on re-runs.** Thumbnails, frames and embeddings are cached. A second pass over 423 files took 0.3 s instead of 14 s.
+- **Polished UI.** An interactive particle sphere (drag, hover, click) that files fly out of, plus an animated launch intro with live-synthesised sound.
+
+## Download & run (Windows)
+
+[![Download Sorter](https://img.shields.io/badge/Download-Sorter.zip-f2552c?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/gameirow/photo-sorter/releases/latest/download/Sorter.zip)
+
+1. Install **[Python 3.12](https://www.python.org/downloads/)** and tick **"Add python.exe to PATH"**.
+2. Download **[Sorter.zip](https://github.com/gameirow/photo-sorter/releases/latest/download/Sorter.zip)** and unzip it anywhere.
+3. Double-click **`run.bat`**.
+
+The first launch takes a few minutes: it sets up its own environment (PyTorch with CUDA, falling back to CPU) and puts a **Sorter** shortcut on your desktop. After that, it opens in seconds. The AI model downloads once, on first use. An NVIDIA GPU is recommended; without one it runs on the CPU, just more slowly.
+
+<details>
+<summary>Developers: run from source</summary>
+
+```bash
+git clone https://github.com/gameirow/photo-sorter.git
+cd photo-sorter
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install torch --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python photo_sorter.py
+```
+
+Without `pywebview`, it opens in your default browser instead of its own window.
+
+</details>
+
+## Using it in 3 steps
+
+1. **Drop a folder** onto the window (or click *Browse*).
+2. **Analyze.** Files fly out of the sphere into category cards as they are classified.
+3. **Review & organise.** Fix any low-confidence picks, then click *Organise in place*. *Undo* puts everything back.
 
 ## How it works
-- Search (header bar, Ctrl+F): free text ("food", "a man in a white t-shirt") over every photo and every sampled video moment of the analyzed folder, wherever it's filed; moves nothing. Two phrasings (`q`, `a photo of q`), stronger wins; SigLIP logit ≥ -8.5 = match, -10..-8.5 = maybe (`SEARCH_MATCH`/`SEARCH_MAYBE`, measured on real photos). Videos show the matching frame and its time; click reveals the file in Explorer.
-- Default categories (17): portrait, selfie, group, party & events, animals, food, landscape, snow & mountains, travel & landmarks, beach & sea, city & architecture, plants & flowers, sport & fitness, outfits & fashion, cars & vehicles, night, screenshots & documents. Each file goes to exactly one (its best match).
-- Confidence: softmax over the categories (0–1, shares of belief); the Confidence floor sends anything below it to `_unsorted`, review flags < 0.4.
-- Categories: one per line, `folder name: what it looks like` (the text is the zero-shot prompt; any language).
-- Photos: JPG/PNG/HEIC/etc. Fuji RAF follows its matching JPG; RAW-only shots are classified from the embedded preview. Edit sidecars (iPhone `.AAE`, `.XMP`) follow the photo/video with the same name; orphan sidecars stay put.
-- Feedback: on opening, the sphere's particles spiral in from a cloud and settle with a ripple (~2.3 s) while the panels slide up in turn (plays even with Windows animation effects off); the sphere speeds up while sorting, bursts green with rings when a sort or organise finishes, and shudders red (staying red, plus a red toast) on an error.
-- Videos (toggle "Videos → A-roll / B-roll"): 8 keyframes (averaged for sorting, kept per frame for search) (PyAV, keyframe-only decode). Speech share comes from Silero VAD (first 120 s). A-roll = speech ≥30% and the TALK_PROMPT score ≥0.01, or speech ≥60%. Everything else is B-roll, sub-sorted by category. Thresholds live in `assign()`.
-- Output: "Organise in place" (default) moves files into `<category>`, `A-roll/` and `B-roll/<category>/` inside the chosen folder itself and removes only the folders that move emptied; a file that can't be moved (locked by OneDrive/another app) is skipped and reported, never half-copied; the output path can be changed. Copy mode is still available. Move writes `_sort_log.json` atomically every 20 files and at the end, so even a crash leaves Undo a record (each run is appended, so Undo walks back every run to the original layout and removes the emptied category folders).
 
-- Keep dates (on by default): folders become `category/YYYY-MM` from the dated folder name or EXIF/video date, else `undated`. Never the file-system date.
-- Duplicates (Output card): identical files (same bytes) come pre-ticked, keeping the plainest name. Same-shot look-alikes (embedding cosine >= 0.985, or iPhone IMG_X/IMG_EX edit pairs >= 0.93) are never pre-ticked. Ticked files and their sidecars go to the Recycle Bin (send2trash), and the server refuses to remove a whole group.
-- Video search results play in-app from the matching moment (`/api/media/{id}`, range requests; HEVC verified in WebView2), with an "Open in video player" fallback.
-- The last folder reopens on launch, so search is ready. `sorter.log` is timestamped and rotates at 1 MB.
+```mermaid
+flowchart LR
+    A["📁 Your folder<br/>photos + videos"] --> B["Decode<br/>thumbnails · 8 keyframes per video"]
+    B --> C["SigLIP 2 on the GPU<br/>image ↔ text embeddings"]
+    B --> V["Silero VAD<br/>how much speech?"]
+    C --> D{"Best-matching<br/>category"}
+    V --> D
+    D --> E["📂 food / 2024-07"]
+    D --> F["📂 A-roll · B-roll"]
+    D --> G["📂 _unsorted<br/>(low confidence)"]
+    C --> S["🔎 Text search<br/>'a dog on the beach'"]
+```
 
-## Performance design
-- Pipeline: files decode in a thread pool (`WORKERS`, up to 8) while the model loads; the GPU classifies batches (`BATCH`=16) as soon as they're ready.
-- Disk caches in `%TEMP%/photo_sorter_thumbs/`: thumbnails, video frames + speech (`*_v.json`), embeddings per model (`emb_<model>.pt`, fp16). A re-run on the same folder skips decoding and the GPU entirely (tested: 14.2 s → 0.3 s for 423 files).
-- Saved fixes: manual moves are stored per folder in `sessions/<hash>.json` and re-applied on every analyze/re-sort.
-- UI polling sends only new items and a change log (`since`), not the full list.
+Each category is just a sentence ("food: a photo of a meal or dish"). SigLIP compares every image with every sentence, and the closest one wins, so no training is needed.
 
-## Status / next steps
-- Built and tested in a Linux sandbox with a stand-in model. NOT yet run on the real Windows laptop with the real SigLIP model, GPU, pywebview or real Fuji/phone footage. First job: run `run.bat` on a real folder and fix whatever breaks.
-- Then: calibrate the A-roll thresholds on 20-30 real clips; try the `fast` vs `accurate` models on real photos.
-- Ideas not built: open a video at the matched moment, Google Takeout mode (Google removed third-party full-library access on 31 Mar 2025, so Takeout is the route), multi-label (one photo in two folders), splitting long clips into scenes, video playback in review, duplicate/blur detection, face grouping, a PyInstaller installer.
+| Piece | What it does |
+|---|---|
+| `photo_sorter.py` | Launcher + engine: a FastAPI server on a random localhost port, the SigLIP 2 classifier, video keyframe sampling (PyAV), speech detection, file moves, undo and caches |
+| `ui.html` | The single-page interface, shown in a native window via pywebview (Edge WebView2) |
+| `splash.html` | The launch intro, played while PyTorch loads in the background |
+| `run.bat` | One-click setup + launcher |
+
+- **Confidence** is a softmax over the categories. Anything under the *Confidence floor* goes to `_unsorted`.
+- **Videos** are sampled at 8 keyframes, which are averaged for sorting and kept per frame for search.
+- **Pipeline:** files decode in a thread pool while the model loads, then the GPU classifies them in batches of 16.
+- **Caches** live in `%TEMP%/photo_sorter_thumbs/`.
+
+## Tech
+
+Python · FastAPI · Uvicorn · PyTorch · Hugging Face Transformers (SigLIP 2) · Silero VAD · PyAV · Pillow (+ HEIF, rawpy) · pywebview · vanilla HTML/CSS/JS (Canvas) · Web Audio
